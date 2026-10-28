@@ -21,6 +21,7 @@ uv run uvicorn app.main:app --reload
 - `tests/` — pytest（`uv run pytest`）。計算部の直接呼び出しと `TestClient` で確かめる
 
 （起動の命令やファイル構成を変えたら、この節と README.md を同時に直す）
+（README.md の「今のやり方」と「利用場面」の節は利用者が書いたもの。エージェントは書き換えない）
 
 ## 決まり
 
