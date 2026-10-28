@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>食べ歩きプラン</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://unpkg.com/vue@3.5.13/dist/vue.global.prod.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+<body>
+<div id="app" v-cloak>
+  <header>
+    <h1>食べ歩きプランの最適化</h1>
+    <nav>
+      <a href="/docs" target="_blank">API の説明（/docs）</a>
+      <a href="/api/sample.xlsx">Excel の見本</a>
+    </nav>
+  </header>
+
+  <main v-if="settings && dataset">
+    <div class="grid">
+      <!-- 条件 -->
+      <section>
+        <h2>条件</h2>
+        <fieldset>
+          <legend>時間と場所</legend>
+          <label>出発 <select v-model="settings.start_station"><option v-for="s in dataset.stations" :value="s.id">{{ s.name }}</option></select></label>
+          <label>到着 <select v-model="settings.end_station"><option v-for="s in dataset.stations" :value="s.id">{{ s.name }}</option></select></label>
+          <label>使える時間 <input type="time" v-model="settings.time_start"> 〜 <input type="time" v-model="settings.time_end"></label>
+        </fieldset>
+        <fieldset>
+          <legend>食事</legend>
+          <label>食事を始める時間帯 <input type="time" v-model="settings.meal_from"> 〜 <input type="time" v-model="settings.meal_to"></label>
+          <label>回数 <input type="number" min="0" v-model.number="settings.meals_min"> 〜 <input type="number" min="0" v-model.number="settings.meals_max"> 回</label>
+          <label>食事の開始どうしの間隔 <input type="number" min="0" v-model.number="settings.meal_interval"> 分以上</label>
+        </fieldset>
+        <fieldset>
+          <legend>満腹度</legend>
+          <label>出発時 <input type="number" v-model.number="settings.fullness_start"></label>
+          <label>上限 <input type="number" v-model.number="settings.fullness_max"></label>
+          <label>消化（基本） <input type="number" v-model.number="settings.digest_base"> / 時間</label>
+          <label>疲労度が <input type="number" v-model.number="settings.digest_threshold"> 以上の区間は、さらに <input type="number" v-model.number="settings.digest_extra"> / 時間</label>
+        </fieldset>
+        <fieldset>
+          <legend>疲労度</legend>
+          <label>出発時 <input type="number" v-model.number="settings.fatigue_start"></label>
+          <label>上限（各地点に着いた時点） <input type="number" v-model.number="settings.fatigue_max"></label>
+          <label>1回の食事で下がる量 <input type="number" v-model.number="settings.fatigue_recovery"></label>
+          <p class="muted">移動手段ごとの係数は、右の「移動手段」で変えられます。</p>
+        </fieldset>
+        <fieldset>
+          <legend>予算</legend>
+          <label>食費の上限 <input type="number" v-model.number="settings.food_budget"> 円</label>
+          <label>移動費の上限 <input type="number" v-model.number="settings.transport_budget"> 円</label>
+        </fieldset>
+        <fieldset>
+          <legend>目的と計算</legend>
+          <label><input type="radio" value="満足度最大" v-model="settings.objective"> 満足度を最大に（同じなら移動費が安い方）</label>
+          <label><input type="radio" value="重み付き" v-model="settings.objective"> 満足度 − <input type="number" step="0.01" v-model.number="settings.weight"> × 移動費 を最大に</label>
+          <label><input type="radio" value="移動費最小" v-model="settings.objective"> 満足度 <input type="number" v-model.number="settings.satisfaction_min"> 以上で、移動費を最小に</label>
+          <label>案の数 <input type="number" min="1" max="5" v-model.number="settings.plans"></label>
+          <label>1案あたりの計算時間 <input type="number" min="1" step="1" v-model.number="settings.time_limit"> 秒</label>
+        </fieldset>
+      </section>
+
+      <!-- データ -->
+      <section>
+        <h2>データ</h2>
+        <div class="toolbar">
+          <button class="secondary" @click="loadSample">サンプルに戻す</button>
+          <label class="button secondary">Excel を読み込む <input type="file" accept=".xlsx" @change="upload" hidden></label>
+          <span class="muted">{{ dataNote }}</span>
+        </div>
+        <div class="tabs">
+          <button :class="{active: dataTab === 'shops'}" @click="dataTab = 'shops'">店（{{ dataset.shops.length }}）</button>
+          <button :class="{active: dataTab === 'modes'}" @click="dataTab = 'modes'">移動手段（{{ dataset.modes.length }}）</button>
+        </div>
+        <div class="scroll" v-show="dataTab === 'shops'">
+          <table class="data">
+            <thead><tr><th>指定</th><th>店</th><th>営業</th><th>滞在(分)</th><th>価格(円)</th><th>満足度</th><th>満腹度</th></tr></thead>
+            <tbody>
+              <tr v-for="s in dataset.shops" :key="s.id" :class="pick[s.id]">
+                <td><select v-model="pick[s.id]"><option value="">—</option><option value="must">必ず行く</option><option value="exclude">行かない</option></select></td>
+                <td class="name"><a v-if="s.source" :href="s.source" target="_blank" :title="s.memo">{{ s.name }}</a><span v-else>{{ s.name }}</span>
+                  <div class="muted">{{ s.area }}・{{ s.genre }}</div></td>
+                <td><input class="time" v-model="s.open">〜<input class="time" v-model="s.close"></td>
+                <td><input type="number" v-model.number="s.stay"></td>
+                <td><input type="number" v-model.number="s.price"></td>
+                <td><input type="number" v-model.number="s.satisfaction"></td>
+                <td><input type="number" v-model.number="s.fullness"></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="scroll" v-show="dataTab === 'modes'">
+          <table class="data">
+            <thead><tr><th>手段</th><th>疲労係数（1分あたり）</th><th>速さ</th><th>料金</th><th>メモ</th></tr></thead>
+            <tbody>
+              <tr v-for="m in dataset.modes" :key="m.name">
+                <td><span class="swatch" :style="{background: color(m.name)}"></span>{{ m.name }}</td>
+                <td><input type="number" step="0.1" v-model.number="m.fatigue"></td>
+                <td>{{ m.speed }} m/分</td>
+                <td>{{ m.fare_type }} {{ m.fare_value }}</td>
+                <td class="muted">{{ m.memo }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="muted">徒歩の係数は、電車・バス・自転車の乗り場までの徒歩にも使います。速さや料金は Excel で変えられます。</p>
+        </div>
+      </section>
+    </div>
+
+    <div class="actions">
+      <button @click="solve" :disabled="busy">{{ busy ? '計算中…' : 'プランを作る' }}</button>
+      <span class="muted" v-if="busy">最大でおよそ {{ Math.ceil(settings.plans * settings.time_limit) }} 秒かかります</span>
+    </div>
+
+    <!-- 結果 -->
+    <section v-if="result">
+      <h2>結果</h2>
+      <p :class="['status', statusClass(result.status)]">{{ result.status }}</p>
+      <p v-if="result.message" class="message">{{ result.message }}</p>
+
+      <template v-if="result.plans">
+        <div class="scroll">
+          <table class="compare">
+            <thead><tr><th>案</th><th>状態</th><th>求め方</th><th>満足度</th><th>食費</th><th>移動費</th><th>合計</th><th>疲労度の最大</th><th>食事</th><th>時間</th><th>店</th></tr></thead>
+            <tbody>
+              <tr v-for="(p, i) in result.plans" :key="p.rank" :class="{selected: i === selected}" @click="selected = i">
+                <td>{{ p.rank }}</td><td>{{ p.status }}</td><td>{{ p.method }}</td>
+                <td>{{ fmt(p.totals.satisfaction) }}</td><td>{{ yen(p.totals.food_cost) }}</td><td>{{ yen(p.totals.transport_cost) }}</td>
+                <td>{{ yen(p.totals.total_cost) }}</td><td>{{ fmt(p.totals.fatigue_peak) }}</td><td>{{ p.totals.meals }} 回</td>
+                <td>{{ hm(p.totals.start_time) }}〜{{ hm(p.totals.end_time) }}</td>
+                <td class="shops">{{ p.shops.map(shopName).join(' → ') }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="muted">行を押すと、その案の行程・グラフ・地図を表示します。</p>
+      </template>
+    </section>
+
+    <section v-show="plan">
+      <h2>案 {{ plan && plan.rank }} の行程</h2>
+      <div class="grid">
+        <div class="scroll">
+          <table class="timeline" v-if="plan">
+            <tbody>
+              <tr v-for="s in plan.steps" :class="s.kind">
+                <template v-if="s.kind === '出発' || s.kind === '到着'">
+                  <td class="time">{{ hm(s.time) }}</td><td colspan="2"><b>{{ s.kind }}</b>：{{ s.place }}</td>
+                </template>
+                <template v-else-if="s.kind === '移動'">
+                  <td class="time">{{ hm(s.depart) }}</td>
+                  <td><span class="swatch" :style="{background: color(s.mode)}"></span>{{ s.mode }} {{ s.minutes }}分<span v-if="s.walk_min && s.ride_min" class="muted">（徒歩{{ s.walk_min }}分）</span></td>
+                  <td>{{ yen(s.cost) }}・疲労度 {{ fmt(s.fatigue_after) }} <span class="muted">（+{{ fmt(s.fatigue_added) }}）</span></td>
+                </template>
+                <template v-else>
+                  <td class="time">{{ hm(s.start) }}</td>
+                  <td><b>{{ s.shop }}</b><span v-if="s.wait_min" class="muted">（{{ s.wait_min }}分待ち）</span></td>
+                  <td>{{ yen(s.price) }}・満足度 {{ fmt(s.satisfaction) }}・満腹度 {{ fmt(s.fullness_before) }} → {{ fmt(s.fullness_after) }}</td>
+                </template>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div>
+          <svg v-if="plan" class="chart" viewBox="0 0 600 260" preserveAspectRatio="none">
+            <line v-for="g in chart.grid" :x1="40" :x2="590" :y1="g.y" :y2="g.y" class="grid-line"/>
+            <text v-for="g in chart.grid" x="34" :y="g.y + 4" class="axis" text-anchor="end">{{ g.v }}</text>
+            <text v-for="g in chart.hours" :x="g.x" y="255" class="axis" text-anchor="middle">{{ g.label }}</text>
+            <line :x1="40" :x2="590" :y1="chart.y(settings.fullness_max)" :y2="chart.y(settings.fullness_max)" class="limit full"/>
+            <line :x1="40" :x2="590" :y1="chart.y(settings.fatigue_max)" :y2="chart.y(settings.fatigue_max)" class="limit fat"/>
+            <polyline :points="chart.full" class="line full"/>
+            <polyline :points="chart.fat" class="line fat"/>
+          </svg>
+          <p class="legend"><span class="key full"></span>満腹度 <span class="key fat"></span>疲労度（点線は上限）</p>
+          <div id="map"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <p v-else-if="loadError" class="error">{{ loadError }}</p>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
